@@ -11,6 +11,14 @@ const clinicConfigSchema = new mongoose.Schema(
       type: String,
       default: 'UTC'
     },
+    clinicPhone: {
+      type: String,
+      default: ''
+    },
+    address: {
+      type: String,
+      default: ''
+    },
     workingHours: {
       monday: { start: String, end: String },
       tuesday: { start: String, end: String },
@@ -31,6 +39,34 @@ const clinicConfigSchema = new mongoose.Schema(
     whatsappEnabled: {
       type: Boolean,
       default: true
+    },
+    confirmationsEnabled: {
+      type: Boolean,
+      default: true
+    },
+    remindersEnabled: {
+      type: Boolean,
+      default: true
+    },
+    alertsEnabled: {
+      type: Boolean,
+      default: true
+    },
+    assistantPersonality: {
+      type: String,
+      default: 'Calm and professional'
+    },
+    aiLanguage: {
+      type: String,
+      default: 'English'
+    },
+    responseTone: {
+      type: String,
+      default: 'Professional'
+    },
+    escalationRules: {
+      type: String,
+      default: ''
     }
   },
   {
@@ -39,4 +75,3 @@ const clinicConfigSchema = new mongoose.Schema(
 );
 
 export const ClinicConfig = mongoose.model('ClinicConfig', clinicConfigSchema);
-

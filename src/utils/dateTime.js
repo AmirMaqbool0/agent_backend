@@ -168,19 +168,34 @@ const parseWithFormats = (value, timezone) => {
   return null;
 };
 
+const normalizeStaleAppointmentYear = (date, timezone) => {
+  let parsed = DateTime.fromJSDate(date, { zone: 'utc' }).setZone(timezone);
+  const now = DateTime.now().setZone(timezone);
+
+  if (!parsed.isValid) {
+    return date;
+  }
+
+  if (parsed.year < now.year) {
+    parsed = parsed.set({ year: now.year });
+  }
+
+  return parsed.toUTC().toJSDate();
+};
+
 export const parseAppointmentDateToDate = (
   value,
   { timezone = DEFAULT_APPOINTMENT_TIMEZONE, label = 'Appointment date' } = {}
 ) => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return new Date(value.toISOString());
+    return normalizeStaleAppointmentYear(new Date(value.toISOString()), timezone);
   }
 
   if (typeof value === 'number' && Number.isFinite(value)) {
     const parsed = DateTime.fromMillis(value, { zone: 'utc' });
 
     if (parsed.isValid) {
-      return parsed.toUTC().toJSDate();
+      return normalizeStaleAppointmentYear(parsed.toUTC().toJSDate(), timezone);
     }
   }
 
@@ -195,33 +210,33 @@ export const parseAppointmentDateToDate = (
     const parsed = DateTime.fromFormat(trimmedValue, "yyyy-MM-dd'T'HH:mm", { zone: timezone });
 
     if (parsed.isValid) {
-      return parsed.toUTC().toJSDate();
+      return normalizeStaleAppointmentYear(parsed.toUTC().toJSDate(), timezone);
     }
   }
 
   const explicitIsoCandidate = DateTime.fromISO(trimmedValue, { setZone: true });
   if (explicitIsoCandidate.isValid) {
-    return explicitIsoCandidate.toUTC().toJSDate();
+    return normalizeStaleAppointmentYear(explicitIsoCandidate.toUTC().toJSDate(), timezone);
   }
 
   const slashDateCandidate = parseSlashDateTime(trimmedValue, timezone);
   if (slashDateCandidate?.isValid) {
-    return slashDateCandidate.toUTC().toJSDate();
+    return normalizeStaleAppointmentYear(slashDateCandidate.toUTC().toJSDate(), timezone);
   }
 
   const naturalLanguageCandidate = parseNaturalLanguageDateTime(trimmedValue, timezone);
   if (naturalLanguageCandidate?.isValid) {
-    return naturalLanguageCandidate.toUTC().toJSDate();
+    return normalizeStaleAppointmentYear(naturalLanguageCandidate.toUTC().toJSDate(), timezone);
   }
 
   const formattedCandidate = parseWithFormats(trimmedValue, timezone);
   if (formattedCandidate?.isValid) {
-    return formattedCandidate.toUTC().toJSDate();
+    return normalizeStaleAppointmentYear(formattedCandidate.toUTC().toJSDate(), timezone);
   }
 
   const fallbackDate = new Date(trimmedValue);
   if (!Number.isNaN(fallbackDate.getTime())) {
-    return fallbackDate;
+    return normalizeStaleAppointmentYear(fallbackDate, timezone);
   }
 
   throw new ApiError(

@@ -141,19 +141,50 @@ const getEndedReason = (payload) =>
 
 const getAnalysisSummary = (payload) =>
   getMessagePayload(payload).summary ||
+  getMessagePayload(payload).artifact?.summary ||
   getMessagePayload(payload).analysis?.summary ||
+  getMessagePayload(payload).artifact?.analysis?.summary ||
+  getCallDetails(payload).summary ||
   getCallDetails(payload).analysis?.summary ||
+  getCallDetails(payload).artifact?.summary ||
   payload.summary ||
+  payload.artifact?.summary ||
   payload.analysis?.summary ||
+  payload.artifact?.analysis?.summary ||
   '';
 
 const getAnalysisSentiment = (payload) =>
   getMessagePayload(payload).sentiment ||
+  getMessagePayload(payload).artifact?.sentiment ||
   getMessagePayload(payload).analysis?.sentiment ||
+  getMessagePayload(payload).artifact?.analysis?.sentiment ||
+  getCallDetails(payload).sentiment ||
   getCallDetails(payload).analysis?.sentiment ||
   payload.sentiment ||
+  payload.artifact?.sentiment ||
   payload.analysis?.sentiment ||
+  payload.artifact?.analysis?.sentiment ||
   'unknown';
+
+const buildFallbackSummary = (transcript, existingCallLog = null) => {
+  const trimmedTranscript = String(transcript || '').trim();
+
+  if (trimmedTranscript) {
+    return trimmedTranscript.length > 300
+      ? `${trimmedTranscript.slice(0, 297)}...`
+      : trimmedTranscript;
+  }
+
+  if (existingCallLog?.bookingOutcome && existingCallLog.bookingOutcome !== 'none') {
+    return `Call completed. Booking outcome: ${existingCallLog.bookingOutcome}.`;
+  }
+
+  if (existingCallLog?.transferOutcome && existingCallLog.transferOutcome !== 'none') {
+    return `Call completed. Transfer outcome: ${existingCallLog.transferOutcome}.`;
+  }
+
+  return 'Call completed. No transcript summary was provided by Vapi.';
+};
 
 const getProviderStatus = (payload) =>
   getMessagePayload(payload).status ||
@@ -262,13 +293,13 @@ const finalizeCompletedCallFromExistingLog = async (payload, fallbackStatus = 'c
   const sentimentFromPayload = getAnalysisSentiment(payload);
   const [summary, sentiment] = await Promise.all([
     existingCallLog.summary || !transcript
-      ? Promise.resolve(existingCallLog.summary || '')
+      ? Promise.resolve(existingCallLog.summary || buildFallbackSummary(transcript, existingCallLog))
       : summaryFromPayload
-        ? Promise.resolve(summaryFromPayload)
-        : withRetry(() => summarizeTranscript(transcript), { operationName: 'openai-summary' }).catch((error) => {
-            logger.warn(`[VAPI] summary fallback failed | callId=${callSid} | error=${error.message}`);
-            return '';
-          }),
+          ? Promise.resolve(summaryFromPayload)
+          : withRetry(() => summarizeTranscript(transcript), { operationName: 'openai-summary' }).catch((error) => {
+              logger.warn(`[VAPI] summary fallback failed | callId=${callSid} | error=${error.message}`);
+              return buildFallbackSummary(transcript, existingCallLog);
+            }),
     existingCallLog.sentiment && existingCallLog.sentiment !== 'unknown'
       ? Promise.resolve(existingCallLog.sentiment)
       : sentimentFromPayload && sentimentFromPayload !== 'unknown'
@@ -1016,10 +1047,12 @@ export const finalizeCallReport = async (payload) => {
   const [summary, sentiment] = await Promise.all([
     summaryFromPayload
       ? Promise.resolve(summaryFromPayload)
-      : withRetry(() => summarizeTranscript(transcript), { operationName: 'openai-summary' }).catch((error) => {
-          logger.warn(`[VAPI] summary fallback failed | callId=${callSid} | error=${error.message}`);
-          return '';
-        }),
+      : transcript
+        ? withRetry(() => summarizeTranscript(transcript), { operationName: 'openai-summary' }).catch((error) => {
+            logger.warn(`[VAPI] summary fallback failed | callId=${callSid} | error=${error.message}`);
+            return buildFallbackSummary(transcript, existingCallLog);
+          })
+        : Promise.resolve(buildFallbackSummary(transcript, existingCallLog)),
     sentimentFromPayload && sentimentFromPayload !== 'unknown'
       ? Promise.resolve(sentimentFromPayload)
       : withRetry(() => analyzeSentiment(transcript), { operationName: 'openai-sentiment' }).catch((error) => {
@@ -1426,5 +1459,3 @@ export const handleVapiEvent = async (eventTypeOrPayload, maybePayload) => {
       };
   }
 };
-
-
