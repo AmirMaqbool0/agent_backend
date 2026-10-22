@@ -2,7 +2,14 @@ import { body } from 'express-validator';
 
 export const updateClinicConfigValidation = [
   body('clinicName').optional({ checkFalsy: true }).trim().notEmpty().withMessage('Clinic name cannot be empty'),
-  body('timezone').optional({ checkFalsy: true }).trim().notEmpty().withMessage('Timezone cannot be empty'),
+  body('timezone')
+    .optional({ checkFalsy: true })
+    .trim()
+    .custom((value) => {
+      new Intl.DateTimeFormat('en-US', { timeZone: value });
+      return true;
+    })
+    .withMessage('Timezone must be a valid IANA timezone such as Asia/Karachi'),
   body('clinicPhone').optional({ checkFalsy: true }).trim(),
   body('address').optional({ checkFalsy: true }).trim(),
   body('emergencyTransferNumber')

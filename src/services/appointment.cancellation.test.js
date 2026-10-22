@@ -4,9 +4,16 @@ import test from 'node:test';
 import mongoose from 'mongoose';
 
 import { Appointment } from '../models/appointment.model.js';
+import { ClinicConfig } from '../models/clinicConfig.model.js';
 import { Patient } from '../models/patient.model.js';
+import { User } from '../models/user.model.js';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+// Integration tests: they need a running backend. Point TEST_API_URL at an instance started with
+// GOOGLE_CALENDAR_AUTH_MODE=disabled so no real calendar events are created. WhatsApp sending is
+// switched off in clinic settings for the duration of the run, so no real messages go out.
+const API_BASE_URL = process.env.TEST_API_URL || 'http://localhost:5000/api';
+const TEST_USER = { email: 'integration-tests@clinic.test', password: 'IntegrationTest123' };
+let originalWhatsappEnabled = true;
 const createdAppointmentIds = new Set();
 const createdPatientIds = new Set();
 
@@ -16,21 +23,26 @@ const jsonHeaders = {
 
 const uniqueSuffix = () => `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
+const futureDate = (daysAhead, hourUtc) => {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + daysAhead);
+  date.setUTCHours(hourUtc, Math.floor(Math.random() * 4) * 10, 0, 0);
+  return date.toISOString();
+};
+
 const registerAndLogin = async () => {
-  const email = `cancel-audit-${uniqueSuffix()}@example.com`;
-  const response = await fetch(`${API_BASE_URL}/auth/register`, {
+  if (!(await User.exists({ email: TEST_USER.email }))) {
+    await User.create({ name: 'Integration Tests', role: 'admin', ...TEST_USER });
+  }
+
+  const response = await fetch(`${API_BASE_URL}/auth/login`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({
-      name: 'Cancellation Audit User',
-      email,
-      password: 'CancelAudit123',
-      role: 'admin'
-    })
+    body: JSON.stringify(TEST_USER)
   });
 
   const payload = await response.json();
-  assert.equal(response.status, 201);
+  assert.equal(response.status, 200);
   assert.equal(payload.success, true);
 
   return payload.data.token;
@@ -80,6 +92,9 @@ const cancelThroughWebhook = async (body) => {
 
 test.before(async () => {
   await mongoose.connect(process.env.MONGODB_URI);
+  const config = await ClinicConfig.findOne();
+  originalWhatsappEnabled = config?.whatsappEnabled ?? true;
+  await ClinicConfig.updateOne({}, { $set: { whatsappEnabled: false } }, { upsert: true });
 });
 
 test.after(async () => {
@@ -95,6 +110,8 @@ test.after(async () => {
     });
   }
 
+  await ClinicConfig.updateOne({}, { $set: { whatsappEnabled: originalWhatsappEnabled } });
+  await User.deleteOne({ email: TEST_USER.email });
   await mongoose.disconnect();
 });
 
@@ -104,7 +121,7 @@ test('Case 1: normal cancellation updates MongoDB and deletes the calendar event
   const appointment = await createAppointmentViaApi({
     token,
     phone,
-    appointmentDate: '2026-07-10T10:00:00.000Z'
+    appointmentDate: futureDate(30, 5)
   });
 
   const { status, payload } = await cancelThroughWebhook({ phone });
@@ -125,7 +142,7 @@ test('Case 2: Twilio failure does not block cancellation success', async () => {
   const appointment = await createAppointmentViaApi({
     token,
     phone,
-    appointmentDate: '2026-07-11T10:30:00.000Z'
+    appointmentDate: futureDate(31, 6)
   });
 
   await Patient.findByIdAndUpdate(appointment.patient._id, {
@@ -154,7 +171,7 @@ test('Case 3: already cancelled appointment returns success false', async () => 
   const appointment = await createAppointmentViaApi({
     token,
     phone,
-    appointmentDate: '2026-07-12T11:00:00.000Z'
+    appointmentDate: futureDate(32, 7)
   });
 
   const firstCancellation = await cancelThroughWebhook({

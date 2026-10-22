@@ -1,4 +1,5 @@
 import { FAQKnowledge } from '../models/faqKnowledge.model.js';
+import { getClinicConfig } from './clinic.service.js';
 import { answerFaqWithOpenAi } from './openai.service.js';
 import { ApiError } from '../utils/apiError.js';
 import { logger } from '../utils/logger.js';
@@ -247,6 +248,25 @@ export const findFaqMatches = async (question) => {
   return acceptedMatches;
 };
 
+// Gives the OpenAI fallback the real clinic facts so it does not invent hours or addresses.
+const buildClinicContext = async () => {
+  const config = await getClinicConfig();
+  const workingHours = config.workingHours?.toObject?.() || config.workingHours || {};
+  const hours = Object.entries(workingHours)
+    .map(([day, value]) => `${day}: ${value?.start && value?.end ? `${value.start}-${value.end}` : 'closed'}`)
+    .join(', ');
+
+  return [
+    `Name: ${config.clinicName}`,
+    config.address ? `Address: ${config.address}` : '',
+    config.clinicPhone ? `Phone: ${config.clinicPhone}` : '',
+    hours ? `Opening hours: ${hours}` : '',
+    `Standard appointment length: ${config.appointmentDurationMinutes} minutes`
+  ]
+    .filter(Boolean)
+    .join('\n');
+};
+
 export const answerFaq = async (question) => {
   const matches = await findFaqMatches(question);
 
@@ -259,7 +279,12 @@ export const answerFaq = async (question) => {
   }
 
   logger.info(`FAQ fallback to OpenAI for question: ${question}`);
-  const answer = await answerFaqWithOpenAi({ question, faqs: matches });
+  const answer = await answerFaqWithOpenAi({
+    question,
+    // No entry matched closely enough; let the model see the knowledge base for near-misses.
+    faqs: await FAQKnowledge.find({ isActive: true }).sort({ updatedAt: -1 }).limit(15),
+    clinicContext: await buildClinicContext()
+  });
   return {
     source: 'openai',
     answer,

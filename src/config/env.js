@@ -1,4 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 import dotenv from 'dotenv';
+
+const envFilePath = path.resolve(process.cwd(), '.env');
 
 dotenv.config();
 
@@ -57,6 +62,8 @@ export const env = {
   logLevel: process.env.LOG_LEVEL || 'info',
   debugVapi: String(process.env.DEBUG_VAPI || 'false').toLowerCase() === 'true',
   webhookSecret: process.env.WEBHOOK_SECRET || '',
+  vapiWebhookSecret: (process.env.VAPI_WEBHOOK_SECRET || '').trim(),
+  defaultClinicTimezone: process.env.CLINIC_TIMEZONE || 'Asia/Karachi',
   openAiApiKey: process.env.OPENAI_API_KEY || '',
   openAiModel: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
   vapiApiKey: process.env.VAPI_API_KEY || '',
@@ -72,5 +79,28 @@ export const env = {
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
   twilioWhatsappFrom: process.env.TWILIO_WHATSAPP_FROM || '',
-  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173'
+  // Approved WhatsApp templates (Twilio Content SIDs, "HX..."). Variables: {{1}} patient name,
+  // {{2}} clinic name, {{3}} date, {{4}} time. Leave empty to send free-form text instead.
+  whatsappTemplates: {
+    confirmation: (process.env.TWILIO_TEMPLATE_CONFIRMATION_SID || '').trim(),
+    reschedule: (process.env.TWILIO_TEMPLATE_RESCHEDULE_SID || '').trim(),
+    cancellation: (process.env.TWILIO_TEMPLATE_CANCELLATION_SID || '').trim()
+  },
+  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  // Public https address of this backend (tunnel or deployed URL). Twilio posts delivery updates here.
+  // Re-read from .env on each access so a tunnel address change applies without restarting the server.
+  get publicBaseUrl() {
+    let value = process.env.PUBLIC_BASE_URL || '';
+
+    try {
+      const fromFile = /^PUBLIC_BASE_URL=(.*)$/m.exec(fs.readFileSync(envFilePath, 'utf8'))?.[1];
+      if (fromFile !== undefined) {
+        value = fromFile;
+      }
+    } catch (_error) {
+      // No .env file (e.g. on Render): the process environment is the source of truth.
+    }
+
+    return value.trim().replace(/^"|"$/g, '').replace(/\/$/, '');
+  }
 };

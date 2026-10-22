@@ -8,8 +8,19 @@ const startServer = async () => {
   console.log('GOOGLE_CALENDAR_ID =', env.googleCalendarId);
   console.log('GOOGLE_CALENDAR_AUTH_MODE =', env.googleCalendarAuthMode);
 
-  app.listen(env.port, () => {
+  const server = app.listen(env.port, () => {
     logger.info(`Server running on port ${env.port}`);
+  });
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      logger.error(
+        `Port ${env.port} is already in use. Another backend is probably still running; stop it or set PORT to a different value in backend/.env.`
+      );
+    } else {
+      logger.error(`Server error: ${error.message}`);
+    }
+    process.exit(1);
   });
 };
 

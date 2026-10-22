@@ -4,13 +4,13 @@ import { DateTime, Interval } from 'luxon';
 import {
   buildFallbackAvailabilityRange,
   createClinicSlots,
-  DEFAULT_CLINIC_TIMEZONE,
   DEFAULT_SLOT_DURATION_MINUTES,
   resolveAvailabilityRange
 } from '../utils/availability.js';
 import {
   cancelCalendarEvent,
   createCalendarEvent,
+  isCalendarEnabled,
   listCalendarEvents,
   updateCalendarEvent
 } from './googleCalendar.service.js';
@@ -23,11 +23,21 @@ import {
   safeSendNotification,
   sendWhatsappMessage
 } from './twilio.service.js';
-import { getClinicConfig } from './clinic.service.js';
+import {
+  formatClinicDate,
+  formatClinicDateTime,
+  formatClinicTime,
+  getClinicConfig,
+  resolveClinicTimezone
+} from './clinic.service.js';
+import { env } from '../config/env.js';
 import { ApiError } from '../utils/apiError.js';
 import { parseAppointmentDateToDate } from '../utils/dateTime.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+
+// Allow a small grace window so a booking made "right now" is not rejected by clock drift.
+const PAST_BOOKING_GRACE_MS = 5 * 60 * 1000;
 
 const toUtcInterval = (startDateTime, endDateTime) =>
   Interval.fromDateTimes(startDateTime.toUTC(), endDateTime.toUTC());
@@ -57,9 +67,9 @@ const buildIntervalFromIso = ({ start, end, clinicTimezone }) => {
 
 const applyNotificationResult = async (appointment, notificationResult) => {
   const sent = Boolean(notificationResult?.success);
+  const skipped = Boolean(notificationResult?.providerResult?.skipped);
   const error = notificationResult?.error || '';
   const attemptedAt = notificationResult?.attemptedAt || new Date();
-  const whatsappStatus = sent ? 'sent' : 'failed';
 
   appointment.notificationStatus = {
     ...(appointment.notificationStatus || {}),
@@ -73,14 +83,19 @@ const applyNotificationResult = async (appointment, notificationResult) => {
     ...(appointment.notificationLogs || []),
     {
       channel: notificationResult?.channel || 'whatsapp',
-      status: sent ? 'sent' : notificationResult?.providerResult?.skipped ? 'skipped' : 'failed',
+      status: sent ? 'sent' : skipped ? 'skipped' : 'failed',
       reason: error,
+      sid: notificationResult?.providerResult?.sid || '',
+      template: notificationResult?.providerResult?.usedTemplate || '',
+      fallbackBody: notificationResult?.providerResult?.usedTemplate ? notificationResult.providerResult.body || '' : '',
       createdAt: attemptedAt
     }
   ];
   appointment.confirmationSent = sent;
-  appointment.whatsappStatus = whatsappStatus;
+  appointment.whatsappStatus = sent ? 'sent' : skipped ? 'skipped' : 'failed';
   appointment.whatsappError = error;
+  // Twilio reports final delivery asynchronously; the SID links that report back to this appointment.
+  appointment.whatsappMessageSid = notificationResult?.providerResult?.sid || '';
   await appointment.save();
 };
 
@@ -99,7 +114,7 @@ const attachAppointmentMeta = (appointmentDoc, meta = {}) => {
 };
 
 const buildCalendarEventPayload = ({
-  appointment,
+  reason,
   patient,
   startDate,
   durationMinutes,
@@ -107,7 +122,7 @@ const buildCalendarEventPayload = ({
 }) => ({
   summary: `Patient Appointment - ${patient?.fullName || 'Clinic Patient'}`,
   description: `Patient: ${patient?.fullName || 'Unknown'}\nPhone: ${patient?.phone || 'Unknown'}\nReason: ${
-    appointment.reason || 'Clinic appointment'
+    reason || 'Clinic appointment'
   }`,
   start: {
     dateTime: startDate.toISOString(),
@@ -118,6 +133,134 @@ const buildCalendarEventPayload = ({
     timeZone: clinicTimezone
   }
 });
+
+// Calendar sync never decides whether a booking succeeds: the appointment in MongoDB is the record,
+// and calendarStatus tells staff when the Google event needs attention.
+const createCalendarEventSafely = async (payload) => {
+  if (!isCalendarEnabled()) {
+    return { status: 'disabled', eventId: '' };
+  }
+
+  try {
+    const event = await withRetry(
+      () =>
+        createCalendarEvent({
+          summary: payload.summary,
+          description: payload.description,
+          start: payload.start.dateTime,
+          end: payload.end.dateTime
+        }),
+      { operationName: 'google-calendar-create' }
+    );
+    return { status: event?.id ? 'created' : 'failed', eventId: event?.id || '' };
+  } catch (error) {
+    logger.error(`Google Calendar event creation failed: ${error.message}`);
+    return { status: 'failed', eventId: '', error: error.message };
+  }
+};
+
+const updateCalendarEventSafely = async (eventId, payload) => {
+  if (!isCalendarEnabled()) {
+    return { status: 'disabled', eventId };
+  }
+
+  if (!eventId) {
+    return createCalendarEventSafely(payload);
+  }
+
+  try {
+    const event = await withRetry(
+      () =>
+        updateCalendarEvent(eventId, {
+          summary: payload.summary,
+          description: payload.description,
+          start: payload.start,
+          end: payload.end
+        }),
+      { operationName: 'google-calendar-reschedule' }
+    );
+    return { status: 'created', eventId: event?.id || eventId };
+  } catch (error) {
+    logger.error(`Google Calendar event update failed: ${error.message}`);
+    return { status: 'failed', eventId, error: error.message };
+  }
+};
+
+const deleteCalendarEventSafely = async (eventId) => {
+  if (!eventId) {
+    return { status: 'deleted' };
+  }
+
+  if (!isCalendarEnabled()) {
+    return { status: 'disabled' };
+  }
+
+  try {
+    await withRetry(() => cancelCalendarEvent(eventId), {
+      operationName: 'google-calendar-cancel'
+    });
+    return { status: 'deleted' };
+  } catch (error) {
+    logger.error(`Google Calendar event deletion failed: ${error.message}`);
+    return { status: 'failed', error: error.message };
+  }
+};
+
+const skippedNotification = (reason) => ({
+  success: false,
+  channel: 'whatsapp',
+  error: reason,
+  attemptedAt: new Date(),
+  providerResult: { skipped: true }
+});
+
+// Approved template for this kind of message, with its variables filled in clinic time.
+// Template variables: {{1}} patient name, {{2}} clinic name, {{3}} date, {{4}} time.
+const buildTemplate = ({ kind, config, patientName, appointmentDate }) => {
+  const contentSid = env.whatsappTemplates[kind];
+
+  if (!contentSid) {
+    return null;
+  }
+
+  const timezone = resolveClinicTimezone(config);
+  return {
+    contentSid,
+    variables: {
+      1: patientName || 'there',
+      2: config.clinicName || 'the clinic',
+      3: formatClinicDate(appointmentDate, timezone),
+      4: formatClinicTime(appointmentDate, timezone)
+    }
+  };
+};
+
+// Respects the WhatsApp and confirmation switches on the Settings page.
+const notifyPatient = async ({ config, kind, phone, patientName, appointmentDate, buildMessage }) => {
+  if (!config.whatsappEnabled) {
+    return skippedNotification('WhatsApp notifications are turned off in clinic settings');
+  }
+
+  if (kind === 'confirmation' && config.confirmationsEnabled === false) {
+    return skippedNotification('Booking confirmations are turned off in clinic settings');
+  }
+
+  const body = await buildMessage();
+  const template = buildTemplate({ kind, config, patientName, appointmentDate });
+  const result = await safeSendNotification(
+    () =>
+      withRetry(() => sendWhatsappMessage({ to: phone, body, template }), {
+        operationName: `twilio-whatsapp-${kind}`
+      }),
+    'whatsapp'
+  );
+
+  if (!result.success) {
+    logger.warn(`WhatsApp ${kind} was not delivered: ${result.error || 'unknown reason'}`);
+  }
+
+  return result;
+};
 
 const buildPhoneCandidates = (value = '') => {
   const normalizedPhone = normalizePhoneNumber(value);
@@ -156,43 +299,71 @@ const findAppointmentByIdOrPhone = async ({
     return null;
   }
 
-  if (includeCancelled) {
-    const activeAppointment = await Appointment.findOne({
-      patient: patient._id,
-      status: { $nin: ['cancelled'] }
-    })
-      .populate('patient')
-      .sort({ appointmentDate: 1 });
-
-    if (activeAppointment) {
-      return activeAppointment;
-    }
-
-    return Appointment.findOne({
-      patient: patient._id
-    })
-      .populate('patient')
-      .sort({ appointmentDate: -1 });
-  }
-
-  return Appointment.findOne({
+  // Prefer the next upcoming active appointment; a caller saying "cancel my appointment"
+  // means the one that is still ahead of them.
+  const upcomingAppointment = await Appointment.findOne({
     patient: patient._id,
-    status: { $nin: ['cancelled'] }
+    status: { $nin: ['cancelled', 'completed'] },
+    appointmentDate: { $gte: new Date(Date.now() - PAST_BOOKING_GRACE_MS) }
   })
     .populate('patient')
     .sort({ appointmentDate: 1 });
+
+  if (upcomingAppointment) {
+    return upcomingAppointment;
+  }
+
+  if (!includeCancelled) {
+    return null;
+  }
+
+  return Appointment.findOne({
+    patient: patient._id
+  })
+    .populate('patient')
+    .sort({ appointmentDate: -1 });
+};
+
+// Two appointments overlap when each one starts before the other ends.
+const findConflictingAppointment = async ({ start, durationMinutes, excludeId }) => {
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
+  return Appointment.findOne({
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+    status: { $nin: ['cancelled'] },
+    appointmentDate: { $lt: end },
+    $expr: {
+      $gt: [
+        {
+          $add: [
+            '$appointmentDate',
+            { $multiply: [{ $ifNull: ['$durationMinutes', DEFAULT_SLOT_DURATION_MINUTES] }, 60 * 1000] }
+          ]
+        },
+        start
+      ]
+    }
+  });
+};
+
+const assertBookableTime = async ({ start, durationMinutes, excludeId }) => {
+  if (start.getTime() < Date.now() - PAST_BOOKING_GRACE_MS) {
+    throw new ApiError(400, 'Appointment time must be in the future');
+  }
+
+  const conflict = await findConflictingAppointment({ start, durationMinutes, excludeId });
+  if (conflict) {
+    throw new ApiError(409, 'Selected appointment slot is unavailable');
+  }
 };
 
 export const getAvailability = async ({ start, end, dateQuery }) => {
   const config = await getClinicConfig();
-  const clinicTimezone =
-    config.timezone && config.timezone !== 'UTC'
-      ? config.timezone
-      : DEFAULT_CLINIC_TIMEZONE;
+  const clinicTimezone = resolveClinicTimezone(config);
   const slotDurationMinutes =
     config.appointmentDurationMinutes || DEFAULT_SLOT_DURATION_MINUTES;
   const nowLocal = DateTime.now().setZone(clinicTimezone);
-  let { rangeStartUtc, rangeEndUtc, fallbackStrategy, requestedDayLocal } = resolveAvailabilityRange({
+  const { rangeStartUtc, rangeEndUtc, fallbackStrategy, requestedDayLocal } = resolveAvailabilityRange({
     start,
     end,
     dateQuery,
@@ -205,7 +376,6 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
     throw new ApiError(400, 'End date must be later than start date');
   }
 
-  const localStart = rangeStartUtc.setZone(clinicTimezone);
   const slots = createClinicSlots({
     config,
     rangeStartUtc,
@@ -214,15 +384,7 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
     slotDurationMinutes
   });
 
-  console.log('Incoming UTC start:', rangeStartUtc.toISO());
-  console.log('Incoming UTC end:', rangeEndUtc.toISO());
-  console.log('Local clinic start:', localStart.toISO());
-  console.log('Generated slots:', slots.length);
-
   if (!slots.length) {
-    console.log('Booked appointments:', 0);
-    console.log('Google busy events:', 0);
-    console.log('Final free slots:', 0);
     return [];
   }
 
@@ -233,7 +395,10 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
     withRetry(
       () => listCalendarEvents(slotRangeStartUtc.toISO(), slotRangeEndUtc.toISO()),
       { operationName: 'google-calendar-list-availability' }
-    ),
+    ).catch((error) => {
+      logger.warn(`Availability is using clinic bookings only; Google Calendar list failed: ${error.message}`);
+      return [];
+    }),
     Appointment.find({
       status: { $nin: ['cancelled'] },
       appointmentDate: { $lt: slotRangeEndUtc.toJSDate() },
@@ -251,8 +416,6 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
     })
   ]);
 
-  console.log('Booked appointments:', bookedAppointments.length);
-
   const appointmentBusyIntervals = bookedAppointments.map((appointment) =>
     toUtcInterval(
       DateTime.fromJSDate(new Date(appointment.appointmentDate)).toUTC(),
@@ -263,7 +426,7 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
   );
 
   const googleBusyIntervals = calendarEvents
-    .filter((event) => event.status !== 'cancelled')
+    .filter((event) => event.status !== 'cancelled' && event.transparency !== 'transparent')
     .map((event) =>
       buildIntervalFromIso({
         start: event.start?.dateTime || event.start?.date,
@@ -272,8 +435,6 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
       })
     )
     .filter(Boolean);
-
-  console.log('Google busy events:', googleBusyIntervals.length);
 
   const busyIntervals = [...appointmentBusyIntervals, ...googleBusyIntervals];
   const freeSlots = slots.filter((slot) => {
@@ -285,7 +446,9 @@ export const getAvailability = async ({ start, end, dateQuery }) => {
     return !busyIntervals.some((busyInterval) => busyInterval.overlaps(slotInterval));
   });
 
-  console.log('Final free slots:', freeSlots.length);
+  logger.info(
+    `[AVAILABILITY] slots=${slots.length} booked=${bookedAppointments.length} googleBusy=${googleBusyIntervals.length} free=${freeSlots.length}`
+  );
 
   if (!freeSlots.length && fallbackStrategy) {
     const fallbackRange = buildFallbackAvailabilityRange({
@@ -316,106 +479,82 @@ export const createAppointment = async ({
   reason,
   source
 }) => {
-  const date = parseAppointmentDateToDate(appointmentDate);
+  const config = await getClinicConfig();
+  const clinicTimezone = resolveClinicTimezone(config);
+  const date = parseAppointmentDateToDate(appointmentDate, { timezone: clinicTimezone });
   const normalizedPhone = normalizePhoneNumber(phone);
+  const minutes = Number(durationMinutes) || config.appointmentDurationMinutes || DEFAULT_SLOT_DURATION_MINUTES;
 
-  const conflictingAppointment = await Appointment.findOne({
-    appointmentDate: {
-      $gte: new Date(date.getTime() - 29 * 60 * 1000),
-      $lte: new Date(date.getTime() + 29 * 60 * 1000)
-    },
-    status: { $nin: ['cancelled'] }
-  });
+  if (!normalizedPhone) {
+    throw new ApiError(400, 'A valid phone number is required');
+  }
 
-  if (conflictingAppointment) {
-    throw new ApiError(409, 'Selected appointment slot is unavailable');
+  await assertBookableTime({ start: date, durationMinutes: minutes });
+
+  const patientUpdates = { fullName: patientName, phone: normalizedPhone };
+  if (email) {
+    patientUpdates.email = email;
+  }
+  if (notes) {
+    patientUpdates.notes = notes;
   }
 
   const patient = await Patient.findOneAndUpdate(
-    { phone: normalizedPhone },
-    {
-      fullName: patientName,
-      phone: normalizedPhone,
-      email,
-      notes
-    },
-    {
-      new: true,
-      upsert: true
-    }
+    { phone: { $in: buildPhoneCandidates(normalizedPhone) } },
+    { $set: patientUpdates },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-
-  const config = await getClinicConfig();
-  const minutes = durationMinutes || config.appointmentDurationMinutes;
 
   const appointment = await Appointment.create({
     patient: patient._id,
     appointmentDate: date,
     durationMinutes: minutes,
     reason,
+    notes: notes || '',
     source: source || 'phone',
     googleEventId: '',
     calendarStatus: 'pending'
   });
-  console.log('Appointment saved:', appointment._id.toString());
+  logger.info(`[BOOKING] appointment saved | id=${appointment._id} | start=${date.toISOString()}`);
 
-  const calendarPayload = {
-    summary: `Patient Appointment - ${patient.fullName}`,
-    description: `Patient: ${patient.fullName}\nPhone: ${patient.phone}\nReason: ${reason || notes || 'General appointment'}`,
-    start: date.toISOString(),
-    end: new Date(date.getTime() + minutes * 60 * 1000).toISOString()
-  };
-
-  let calendarEvent;
-
-  try {
-    calendarEvent = await withRetry(
-      () => createCalendarEvent(calendarPayload),
-      { operationName: 'google-calendar-create' }
-    );
-  } catch (error) {
-    console.error('Google Calendar creation failed', error);
-    await appointment.deleteOne();
-    throw error;
-  }
-
-  appointment.googleEventId = calendarEvent?.id || '';
-  appointment.calendarStatus = calendarEvent?.id ? 'created' : 'failed';
-  await appointment.save();
-
-  const whatsappMessage = await draftWhatsappConfirmation({
-    patientName: patient.fullName,
-    clinicName: config.clinicName,
-    dateTime: date.toLocaleString()
-  });
-
-  const notificationResult = await safeSendNotification(
-    () =>
-      withRetry(
-        () =>
-          sendWhatsappMessage({
-            to: patient.phone,
-            body: whatsappMessage
-          }),
-        { operationName: 'twilio-whatsapp-confirmation' }
-      ),
-    'whatsapp'
+  const calendarResult = await createCalendarEventSafely(
+    buildCalendarEventPayload({
+      reason: reason || notes,
+      patient,
+      startDate: date,
+      durationMinutes: minutes,
+      clinicTimezone
+    })
   );
 
-  if (!notificationResult.success) {
-    logger.warn(
-      `WhatsApp confirmation was not delivered for appointment ${appointment._id}: ${notificationResult.error || 'unknown reason'}`
-    );
-  }
+  appointment.googleEventId = calendarResult.eventId;
+  appointment.calendarStatus = calendarResult.status;
+  await appointment.save();
+
+  const spokenDateTime = formatClinicDateTime(date, clinicTimezone);
+  const notificationResult = await notifyPatient({
+    config,
+    kind: 'confirmation',
+    phone: patient.phone,
+    patientName: patient.fullName,
+    appointmentDate: date,
+    buildMessage: () =>
+      draftWhatsappConfirmation({
+        patientName: patient.fullName,
+        clinicName: config.clinicName,
+        dateTime: spokenDateTime
+      })
+  });
 
   await applyNotificationResult(appointment, notificationResult);
 
   const populatedAppointment = await Appointment.findById(appointment._id).populate('patient');
 
   return attachAppointmentMeta(populatedAppointment, {
-    calendarEventCreated: Boolean(calendarEvent?.id),
+    calendarEventCreated: calendarResult.status === 'created',
     notificationSent: notificationResult.success,
     notificationError: notificationResult.error,
+    spokenDateTime,
     message: 'Appointment booked successfully.'
   });
 };
@@ -449,58 +588,36 @@ export const cancelAppointment = async ({
   appointment.cancelledAt = new Date();
   appointment.cancelledBy = cancelledBy;
   appointment.cancellationReason = cancellationReason;
+
+  const calendarResult = await deleteCalendarEventSafely(appointment.googleEventId);
+  appointment.calendarStatus = calendarResult.status;
   await appointment.save();
 
-  let calendarEventDeleted = false;
-  if (appointment.googleEventId) {
-    await withRetry(
-      async () => {
-        const result = await cancelCalendarEvent(appointment.googleEventId);
-        calendarEventDeleted = Boolean(result?.success);
-        return result;
-      },
-      { operationName: 'google-calendar-cancel' }
-    );
-  } else {
-    calendarEventDeleted = true;
-  }
-
-  appointment.calendarStatus = calendarEventDeleted ? 'deleted' : 'failed';
-  await appointment.save();
-
-  const clinic = await getClinicConfig();
-  const message = await draftWhatsappUpdate({
-    patientName: appointment.patient.fullName,
-    clinicName: clinic.clinicName,
-    dateTime: new Date(appointment.appointmentDate).toLocaleString(),
-    updateType: 'cancelled'
-  });
-
-  const cancellationNotification = await safeSendNotification(
-    () =>
-      withRetry(
-        () =>
-          sendWhatsappMessage({
-            to: appointment.patient.phone,
-            body: message
-          }),
-        { operationName: 'twilio-whatsapp-cancel' }
-      ),
-    'whatsapp'
-  );
-
-  if (!cancellationNotification.success) {
-    logger.warn(
-      `WhatsApp cancellation message was not delivered for appointment ${appointment._id}: ${cancellationNotification.error || 'unknown reason'}`
-    );
-  }
+  const config = await getClinicConfig();
+  const clinicTimezone = resolveClinicTimezone(config);
+  const cancellationNotification = appointment.patient
+    ? await notifyPatient({
+        config,
+        kind: 'cancellation',
+        phone: appointment.patient.phone,
+        patientName: appointment.patient.fullName,
+        appointmentDate: appointment.appointmentDate,
+        buildMessage: () =>
+          draftWhatsappUpdate({
+            patientName: appointment.patient.fullName,
+            clinicName: config.clinicName,
+            dateTime: formatClinicDateTime(appointment.appointmentDate, clinicTimezone),
+            updateType: 'cancelled'
+          })
+      })
+    : skippedNotification('Appointment has no linked patient');
 
   await applyNotificationResult(appointment, cancellationNotification);
 
   const populatedAppointment = await Appointment.findById(appointment._id).populate('patient');
 
   return attachAppointmentMeta(populatedAppointment, {
-    calendarEventCreated: calendarEventDeleted,
+    calendarEventCreated: calendarResult.status === 'deleted',
     notificationSent: cancellationNotification.success,
     notificationError: cancellationNotification.error,
     message: 'Your appointment has been cancelled successfully.'
@@ -529,138 +646,119 @@ export const rescheduleAppointment = async ({
     throw new ApiError(404, 'Appointment not found');
   }
 
-  const nextDate = parseAppointmentDateToDate(newAppointmentDate || appointmentDate);
+  if (appointment.status === 'cancelled') {
+    throw new ApiError(409, 'Cancelled appointments cannot be rescheduled. Please book a new appointment.');
+  }
 
-  const minutes = durationMinutes || appointment.durationMinutes;
-  const oldAppointmentDate = new Date(appointment.appointmentDate);
   const config = await getClinicConfig();
-  const clinicTimezone = config.timezone && config.timezone !== 'UTC'
-    ? config.timezone
-    : DEFAULT_CLINIC_TIMEZONE;
-
-  const conflictingAppointment = await Appointment.findOne({
-    _id: { $ne: appointment._id },
-    appointmentDate: {
-      $gte: new Date(nextDate.getTime() - 29 * 60 * 1000),
-      $lte: new Date(nextDate.getTime() + 29 * 60 * 1000)
-    },
-    status: { $nin: ['cancelled'] }
+  const clinicTimezone = resolveClinicTimezone(config);
+  const nextDate = parseAppointmentDateToDate(newAppointmentDate || appointmentDate, {
+    timezone: clinicTimezone
   });
+  const minutes = Number(durationMinutes) || appointment.durationMinutes;
 
-  if (conflictingAppointment) {
-    throw new ApiError(409, 'Selected appointment slot is unavailable');
-  }
+  await assertBookableTime({ start: nextDate, durationMinutes: minutes, excludeId: appointment._id });
 
-  const existingCalendarEventId = appointment.googleEventId || appointment.calendarEventId || '';
   const updatedReason = reason || appointment.reason;
-  const calendarEventPayload = buildCalendarEventPayload({
-    appointment: {
-      ...appointment.toObject(),
-      reason: updatedReason
-    },
-    patient: appointment.patient,
-    startDate: nextDate,
-    durationMinutes: minutes,
-    clinicTimezone
-  });
-
-  console.log('Existing calendarEventId:', existingCalendarEventId || 'missing');
-  console.log('Old appointment date:', oldAppointmentDate.toISOString());
-  console.log('New appointment date:', nextDate.toISOString());
-
-  let resolvedCalendarEventId = existingCalendarEventId;
-
-  if (existingCalendarEventId) {
-    try {
-      const updatedCalendarEvent = await withRetry(
-        () =>
-          updateCalendarEvent(existingCalendarEventId, {
-            summary: calendarEventPayload.summary,
-            description: calendarEventPayload.description,
-            start: calendarEventPayload.start,
-            end: calendarEventPayload.end
-          }),
-        { operationName: 'google-calendar-reschedule' }
-      );
-
-      resolvedCalendarEventId = updatedCalendarEvent?.id || existingCalendarEventId;
-      console.log('Google Calendar update success:', {
-        eventId: resolvedCalendarEventId,
-        start: calendarEventPayload.start,
-        end: calendarEventPayload.end
-      });
-    } catch (error) {
-      console.error('Google Calendar update failure:', error);
-      throw error;
-    }
-  } else {
-    try {
-      const createdCalendarEvent = await withRetry(
-        () =>
-          createCalendarEvent({
-            summary: calendarEventPayload.summary,
-            description: calendarEventPayload.description,
-            start: calendarEventPayload.start.dateTime,
-            end: calendarEventPayload.end.dateTime
-          }),
-        { operationName: 'google-calendar-reschedule-create-missing' }
-      );
-
-      resolvedCalendarEventId = createdCalendarEvent?.id || '';
-      console.log('Google Calendar update success:', {
-        eventId: resolvedCalendarEventId,
-        createdBecause: 'calendarEventId missing'
-      });
-    } catch (error) {
-      console.error('Google Calendar update failure:', error);
-      throw error;
-    }
-  }
+  const calendarResult = await updateCalendarEventSafely(
+    appointment.googleEventId,
+    buildCalendarEventPayload({
+      reason: updatedReason,
+      patient: appointment.patient,
+      startDate: nextDate,
+      durationMinutes: minutes,
+      clinicTimezone
+    })
+  );
 
   appointment.appointmentDate = nextDate;
   appointment.durationMinutes = minutes;
-  if (reason) {
-    appointment.reason = reason;
-  }
+  appointment.reason = updatedReason;
   appointment.status = 'confirmed';
-  appointment.googleEventId = resolvedCalendarEventId;
-  appointment.calendarStatus = resolvedCalendarEventId ? 'created' : 'failed';
+  appointment.googleEventId = calendarResult.eventId || '';
+  appointment.calendarStatus = calendarResult.status;
   await appointment.save();
 
-  const message = await draftWhatsappUpdate({
+  const spokenDateTime = formatClinicDateTime(nextDate, clinicTimezone);
+  const rescheduleNotification = await notifyPatient({
+    config,
+    kind: 'reschedule',
+    phone: appointment.patient.phone,
     patientName: appointment.patient.fullName,
-    clinicName: config.clinicName,
-    dateTime: nextDate.toLocaleString(),
-    updateType: 'rescheduled'
+    appointmentDate: nextDate,
+    buildMessage: () =>
+      draftWhatsappUpdate({
+        patientName: appointment.patient.fullName,
+        clinicName: config.clinicName,
+        dateTime: spokenDateTime,
+        updateType: 'rescheduled'
+      })
   });
-
-  const rescheduleNotification = await safeSendNotification(
-    () =>
-      withRetry(
-        () =>
-          sendWhatsappMessage({
-            to: appointment.patient.phone,
-            body: message
-          }),
-        { operationName: 'twilio-whatsapp-reschedule' }
-      ),
-    'whatsapp'
-  );
-
-  if (!rescheduleNotification.success) {
-    logger.warn(
-      `WhatsApp reschedule message was not delivered for appointment ${appointment._id}: ${rescheduleNotification.error || 'unknown reason'}`
-    );
-  }
 
   await applyNotificationResult(appointment, rescheduleNotification);
 
   const populatedAppointment = await Appointment.findById(appointment._id).populate('patient');
 
   return attachAppointmentMeta(populatedAppointment, {
-    calendarEventCreated: Boolean(resolvedCalendarEventId),
+    calendarEventCreated: calendarResult.status === 'created',
     notificationSent: rescheduleNotification.success,
     notificationError: rescheduleNotification.error,
+    spokenDateTime,
     message: 'Appointment rescheduled successfully.'
   });
+};
+
+// Dashboard edits. A changed date or duration goes through the reschedule flow so the calendar
+// and patient stay in sync; everything else is a plain record update.
+export const updateAppointment = async (appointmentId, payload) => {
+  const appointment = await Appointment.findById(appointmentId).populate('patient');
+
+  if (!appointment) {
+    throw new ApiError(404, 'Appointment not found');
+  }
+
+  const nextDuration = payload.durationMinutes ? Number(payload.durationMinutes) : appointment.durationMinutes;
+  const nextDate = payload.appointmentDate
+    ? parseAppointmentDateToDate(payload.appointmentDate, {
+        timezone: resolveClinicTimezone(await getClinicConfig())
+      })
+    : null;
+  const timeChanged =
+    (nextDate && nextDate.getTime() !== new Date(appointment.appointmentDate).getTime()) ||
+    nextDuration !== appointment.durationMinutes;
+
+  if (appointment.patient) {
+    if (payload.patientName) {
+      appointment.patient.fullName = payload.patientName;
+    }
+    if (payload.email !== undefined) {
+      appointment.patient.email = payload.email || '';
+    }
+    await appointment.patient.save();
+  }
+
+  if (payload.reason !== undefined) {
+    appointment.reason = payload.reason;
+  }
+  if (payload.notes !== undefined) {
+    appointment.notes = payload.notes;
+  }
+  if (payload.source) {
+    appointment.source = payload.source;
+  }
+  if (payload.status && payload.status !== 'cancelled') {
+    appointment.status = payload.status;
+  }
+  await appointment.save();
+
+  if (timeChanged && appointment.status !== 'cancelled') {
+    return rescheduleAppointment({
+      appointmentId: appointment._id,
+      appointmentDate: (nextDate || appointment.appointmentDate).toISOString(),
+      durationMinutes: nextDuration,
+      reason: appointment.reason
+    });
+  }
+
+  return Appointment.findById(appointment._id).populate('patient');
 };

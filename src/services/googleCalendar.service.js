@@ -52,6 +52,8 @@ const getServiceAccountCalendarClient = () => {
   });
 };
 
+export const isCalendarEnabled = () => env.googleCalendarAuthMode !== 'disabled';
+
 const getCalendarClient = async () => {
   if (env.googleCalendarAuthMode === 'oauth') {
     return getOAuthCalendarClient();

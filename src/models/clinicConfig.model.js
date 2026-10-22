@@ -9,7 +9,7 @@ const clinicConfigSchema = new mongoose.Schema(
     },
     timezone: {
       type: String,
-      default: 'UTC'
+      default: 'Asia/Karachi'
     },
     clinicPhone: {
       type: String,

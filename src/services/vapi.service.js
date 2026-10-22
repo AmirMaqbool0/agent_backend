@@ -775,7 +775,7 @@ const normalizeCustomToolResult = (toolName, result) => {
         calendarEventCreated: result.calendarEventCreated,
         notificationSent: result.notificationSent,
         notificationError: result.notificationError,
-        message: 'Appointment booked successfully.'
+        message: result.spokenSummary || 'Appointment booked successfully.'
       };
 
     case 'cancelAppointment':
@@ -791,9 +791,11 @@ const normalizeCustomToolResult = (toolName, result) => {
     case 'rescheduleAppointment':
       return {
         success: result.success,
+        appointmentId: result.appointmentId,
+        appointmentDate: result.appointmentDate,
         notificationSent: result.notificationSent,
         notificationError: result.notificationError,
-        message: 'Your appointment has been rescheduled successfully.'
+        message: result.spokenSummary || 'Your appointment has been rescheduled successfully.'
       };
 
     case 'transferToHuman':
@@ -1119,7 +1121,8 @@ const executeClinicFunction = async ({ name, parameters, call }) => {
         calendarEventCreated: appointment.calendarEventCreated,
         notificationSent: appointment.notificationSent,
         notificationError: appointment.notificationError,
-        spokenSummary: 'Appointment booked successfully.'
+        spokenDateTime: appointment.spokenDateTime,
+        spokenSummary: `Appointment booked successfully for ${appointment.spokenDateTime}.`
       };
     }
 
@@ -1152,7 +1155,8 @@ const executeClinicFunction = async ({ name, parameters, call }) => {
         calendarEventCreated: appointment.calendarEventCreated,
         notificationSent: appointment.notificationSent,
         notificationError: appointment.notificationError,
-        spokenSummary: 'Your appointment has been rescheduled successfully.'
+        spokenDateTime: appointment.spokenDateTime,
+        spokenSummary: `Your appointment has been rescheduled to ${appointment.spokenDateTime}.`
       };
     }
 

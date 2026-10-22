@@ -150,7 +150,7 @@ export const analyzeSentiment = async (transcript) => {
   }
 };
 
-export const answerFaqWithOpenAi = async ({ question, faqs = [] }) => {
+export const answerFaqWithOpenAi = async ({ question, faqs = [], clinicContext = '' }) => {
   if (!question) {
     return 'I do not have enough information to answer that right now.';
   }
@@ -172,11 +172,11 @@ export const answerFaqWithOpenAi = async ({ question, faqs = [] }) => {
         {
           role: 'system',
           content:
-            'Answer clinic receptionist questions clearly and briefly. If you do not know, say so without inventing facts.'
+            'You are a clinic phone receptionist. Answer in one or two short, spoken-style sentences using only the clinic facts and FAQ entries provided. If they do not cover the question, say you are not sure and offer to connect the caller with staff. Never invent prices, hours, or medical advice.'
         },
         {
           role: 'user',
-          content: `${context}\n\nQuestion: ${question}`
+          content: `${clinicContext ? `Clinic facts:\n${clinicContext}\n\n` : ''}${context}\n\nQuestion: ${question}`
         }
       ]
     });

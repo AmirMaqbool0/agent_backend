@@ -11,7 +11,14 @@ export const authenticate = asyncHandler(async (req, _res, next) => {
   }
 
   const token = authHeader.split(' ')[1];
-  const decoded = verifyToken(token);
+  let decoded;
+
+  try {
+    decoded = verifyToken(token);
+  } catch (_error) {
+    throw new ApiError(401, 'Your session has expired. Please sign in again.');
+  }
+
   const user = await User.findById(decoded.userId).select('-password');
 
   if (!user) {
@@ -22,3 +29,10 @@ export const authenticate = asyncHandler(async (req, _res, next) => {
   next();
 });
 
+export const requireRole = (...roles) => (req, _res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return next(new ApiError(403, 'You do not have permission to perform this action'));
+  }
+
+  next();
+};

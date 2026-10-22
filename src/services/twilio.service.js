@@ -53,14 +53,39 @@ const buildFailedWhatsappResult = ({ to, body, error, skipped = false }) => ({
   skipped,
   to,
   body,
-  error: error?.message || error || 'WhatsApp delivery failed',
+  error: describeWhatsappError(error?.code, error?.message || error) || 'WhatsApp delivery failed',
   errorCode: error?.code
 });
 
-export const sendWhatsappMessage = async ({ to, body }) => {
-  const client = getTwilioClient();
+// Recipient problems: a free-form retry would fail the same way, so do not fall back for these.
+const RECIPIENT_ERROR_CODES = new Set([21211, 21608, 63003, 63015, 63024, 63038]);
+
+const statusCallbackOptions = () =>
+  // Twilio only accepts the message here; delivery or failure is reported later to this URL.
+  env.publicBaseUrl ? { statusCallback: `${env.publicBaseUrl}/api/webhooks/twilio/status` } : {};
+
+const buildSentResult = ({ response, body, usedTemplate, templateError = '' }) => ({
+  success: true,
+  whatsappStatus: 'sent',
+  whatsappError: '',
+  delivered: true,
+  skipped: false,
+  sid: response.sid,
+  status: response.status,
+  to: response.to,
+  body,
+  usedTemplate,
+  templateError
+});
+
+// Sends a WhatsApp message. With `template` ({ contentSid, variables }) it sends the approved
+// template first and falls back to the free-form `body` if Twilio rejects the template.
+// Free-form text only reaches people who messaged the clinic in the last 24 hours.
+export const sendWhatsappMessage = async ({ to, body, template }, { client: injectedClient } = {}) => {
+  const client = injectedClient || getTwilioClient();
   const from = env.twilioWhatsappFrom;
   const normalizedTo = normalizeWhatsappNumber(to);
+  const contentSid = template?.contentSid?.trim();
 
   if (!normalizedTo) {
     const error = 'WhatsApp recipient phone number is required';
@@ -83,32 +108,41 @@ export const sendWhatsappMessage = async ({ to, body }) => {
     });
   }
 
-  try {
-    console.log('[TWILIO SEND]', {
-      from,
-      to: normalizedTo,
-      body
-    });
+  let templateError = '';
 
+  if (contentSid) {
+    try {
+      const response = await client.messages.create({
+        from,
+        to: normalizedTo,
+        contentSid,
+        contentVariables: JSON.stringify(template.variables || {}),
+        ...statusCallbackOptions()
+      });
+
+      logger.info(`[TWILIO] template ${contentSid} sent | sid=${response.sid}`);
+      return buildSentResult({ response, body, usedTemplate: contentSid });
+    } catch (error) {
+      if (RECIPIENT_ERROR_CODES.has(Number(error.code))) {
+        logger.error(`WhatsApp template failed for recipient: ${error.message}`);
+        return buildFailedWhatsappResult({ to: normalizedTo, body, error });
+      }
+
+      templateError = describeWhatsappError(error.code, error.message);
+      logger.warn(`[TWILIO] template ${contentSid} rejected (${error.code}); falling back to free-form text`);
+    }
+  }
+
+  try {
     const response = await client.messages.create({
       from,
       to: normalizedTo,
-      body
+      body,
+      ...statusCallbackOptions()
     });
 
-    console.log('[TWILIO SUCCESS]', response.sid);
-
-    return {
-      success: true,
-      whatsappStatus: 'sent',
-      whatsappError: '',
-      delivered: true,
-      skipped: false,
-      sid: response.sid,
-      status: response.status,
-      to: response.to,
-      body
-    };
+    logger.info(`[TWILIO] free-form message sent | sid=${response.sid}`);
+    return buildSentResult({ response, body, usedTemplate: '', templateError });
   } catch (error) {
     logger.error(`WhatsApp failed: ${error.message}`);
     console.error('[TWILIO FAILED]', error.code, error.message);
@@ -120,6 +154,24 @@ export const sendWhatsappMessage = async ({ to, body }) => {
     });
   }
 };
+
+// Plain-language explanations for the Twilio WhatsApp errors clinics run into most.
+const WHATSAPP_ERROR_HINTS = {
+  63015: 'Patient has not joined the Twilio WhatsApp sandbox (they must send the join code first).',
+  63016: 'Outside the 24-hour WhatsApp window; an approved message template is required.',
+  63038: 'Twilio trial daily message limit reached. Try again tomorrow or upgrade the account.',
+  63003: 'The phone number is not on WhatsApp.',
+  63024: 'Invalid recipient phone number.',
+  21655: 'The WhatsApp template ID (ContentSid) is invalid for this Twilio account.',
+  21656: 'The WhatsApp template variables do not match the template.',
+  63027: 'The WhatsApp template was not approved or does not exist for this sender.',
+  63049: 'WhatsApp chose not to deliver this marketing-style message.',
+  21211: 'Invalid recipient phone number.',
+  21608: 'Trial accounts can only message verified numbers.'
+};
+
+export const describeWhatsappError = (code, fallback = '') =>
+  WHATSAPP_ERROR_HINTS[Number(code)] || (code ? `WhatsApp delivery failed (Twilio error ${code})${fallback ? `: ${fallback}` : ''}` : fallback);
 
 export const safeSendNotification = async (sendOperation, channel = 'whatsapp') => {
   const attemptedAt = new Date();

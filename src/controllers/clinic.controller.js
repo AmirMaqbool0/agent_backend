@@ -1,4 +1,8 @@
-import { getClinicConfig, updateClinicConfig } from '../services/clinic.service.js';
+import {
+  getClinicConfig,
+  getIntegrationStatus,
+  updateClinicConfig
+} from '../services/clinic.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/response.js';
 
@@ -12,3 +16,6 @@ export const updateClinicSettings = asyncHandler(async (req, res) => {
   sendSuccess(res, 200, 'Clinic configuration updated successfully', config);
 });
 
+export const fetchIntegrationStatus = asyncHandler(async (_req, res) => {
+  sendSuccess(res, 200, 'Integration status fetched successfully', getIntegrationStatus());
+});

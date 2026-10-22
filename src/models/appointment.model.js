@@ -9,7 +9,8 @@ const appointmentSchema = new mongoose.Schema(
     },
     appointmentDate: {
       type: Date,
-      required: true
+      required: true,
+      index: true
     },
     durationMinutes: {
       type: Number,
@@ -41,13 +42,17 @@ const appointmentSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    notes: {
+      type: String,
+      default: ''
+    },
     googleEventId: {
       type: String,
       default: ''
     },
     calendarStatus: {
       type: String,
-      enum: ['pending', 'created', 'deleted', 'failed'],
+      enum: ['pending', 'created', 'deleted', 'failed', 'disabled'],
       default: 'pending'
     },
     confirmationSent: {
@@ -56,12 +61,17 @@ const appointmentSchema = new mongoose.Schema(
     },
     whatsappStatus: {
       type: String,
-      enum: ['pending', 'sent', 'failed'],
+      enum: ['pending', 'sent', 'delivered', 'read', 'failed', 'skipped'],
       default: 'pending'
     },
     whatsappError: {
       type: String,
       default: ''
+    },
+    whatsappMessageSid: {
+      type: String,
+      default: '',
+      index: true
     },
     notificationStatus: {
       whatsapp: {
@@ -95,6 +105,24 @@ const appointmentSchema = new mongoose.Schema(
           reason: {
             type: String,
             default: ''
+          },
+          sid: {
+            type: String,
+            default: ''
+          },
+          // Template (Content SID) used for this message; empty for free-form text.
+          template: {
+            type: String,
+            default: ''
+          },
+          // Free-form text kept so a failed template message can be retried once as plain text.
+          fallbackBody: {
+            type: String,
+            default: ''
+          },
+          fallbackSent: {
+            type: Boolean,
+            default: false
           },
           createdAt: {
             type: Date,
