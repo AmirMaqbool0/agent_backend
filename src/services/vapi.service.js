@@ -562,7 +562,27 @@ const extractParameters = (payload) =>
       payload?.arguments
   );
 
-const getToolCalls = (payload) => {
+// Tool names as configured in Vapi can differ in case or separators ("AnswerFAQ", "answer_faq");
+// map them to the names this backend implements.
+const CANONICAL_TOOL_NAMES = [
+  'checkAvailability',
+  'bookAppointment',
+  'cancelAppointment',
+  'rescheduleAppointment',
+  'transferToHuman',
+  'answerFAQ'
+].reduce((result, name) => {
+  result[name.toLowerCase()] = name;
+  return result;
+}, {});
+
+export const canonicalToolName = (name = '') =>
+  CANONICAL_TOOL_NAMES[String(name).replace(/[^a-z]/gi, '').toLowerCase()] || name;
+
+const getToolCalls = (payload) =>
+  readToolCalls(payload).map((toolCall) => ({ ...toolCall, name: canonicalToolName(toolCall.name) }));
+
+const readToolCalls = (payload) => {
   const message = getMessagePayload(payload);
 
   return message.toolCalls?.map((toolCall) => ({

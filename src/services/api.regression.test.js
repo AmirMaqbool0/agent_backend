@@ -243,6 +243,30 @@ test('vapi booking tool confirms the booked time back to the caller', async () =
   }
 });
 
+test('vapi tools are matched regardless of name capitalization', async () => {
+  const { status, payload } = await request(
+    'POST',
+    '/webhooks/vapi',
+    {
+      message: {
+        type: 'tool-calls',
+        call: { id: `regression-call-faq-${Date.now()}` },
+        toolCallList: [
+          { id: 'tool-faq', function: { name: 'AnswerFAQ', arguments: { question: 'What are your clinic timings?' } } }
+        ]
+      }
+    },
+    null
+  );
+
+  assert.equal(status, 200);
+  const result = payload.results?.[0]?.result;
+  const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+  assert.equal(payload.results?.[0]?.toolCallId, 'tool-faq');
+  assert.equal(parsed.success, true);
+  assert.ok(parsed.spokenAnswer, 'FAQ answer returned');
+});
+
 test('dashboard returns server-side metrics', async () => {
   const { status, payload } = await request('GET', '/dashboard?days=7');
   assert.equal(status, 200);
