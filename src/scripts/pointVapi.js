@@ -38,7 +38,8 @@ const server = {
   url: `${base}/api/webhooks/vapi`,
   // Tool calls include Google Calendar and OpenAI work; give them room on slower hosts.
   timeoutSeconds: 45,
-  ...(process.env.VAPI_WEBHOOK_SECRET ? { secret: process.env.VAPI_WEBHOOK_SECRET } : {})
+  // Sent as a header on every webhook request; the backend checks x-vapi-secret.
+  ...(process.env.VAPI_WEBHOOK_SECRET ? { headers: { 'x-vapi-secret': process.env.VAPI_WEBHOOK_SECRET } } : {})
 };
 
 await vapi(`/assistant/${assistant.id}`, 'PATCH', { server });
@@ -53,4 +54,4 @@ for (const toolId of assistant.model?.toolIds || []) {
   console.log(`tool ${tool.function?.name} -> ${server.url}`);
 }
 
-console.log(server.secret ? 'Webhook secret set on all of them.' : 'Tip: set VAPI_WEBHOOK_SECRET to lock down the webhook.');
+console.log(server.headers ? 'Webhook secret header set on all of them.' : 'Tip: set VAPI_WEBHOOK_SECRET to lock down the webhook.');
