@@ -42,8 +42,17 @@ const server = {
   ...(process.env.VAPI_WEBHOOK_SECRET ? { headers: { 'x-vapi-secret': process.env.VAPI_WEBHOOK_SECRET } } : {})
 };
 
-await vapi(`/assistant/${assistant.id}`, 'PATCH', { server });
+// Setting `serverMessages` replaces Vapi's defaults. Preserve any messages
+// already selected in the dashboard, then guarantee the three this backend
+// needs: live call creation/status, the completed-call report, and tool calls.
+const requiredServerMessages = ['status-update', 'end-of-call-report', 'tool-calls'];
+const serverMessages = [
+  ...new Set([...(assistant.serverMessages || []), ...requiredServerMessages])
+];
+
+await vapi(`/assistant/${assistant.id}`, 'PATCH', { server, serverMessages });
 console.log(`assistant ${assistant.name} -> ${server.url}`);
+console.log(`server messages -> ${serverMessages.join(', ')}`);
 
 for (const toolId of assistant.model?.toolIds || []) {
   const tool = await vapi(`/tool/${toolId}`);

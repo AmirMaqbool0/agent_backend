@@ -438,10 +438,28 @@ const appendTranscript = (existingTranscript, nextChunk) => {
   return `${currentTranscript}\n${trimmedNextChunk}`.trim();
 };
 
-const buildToolResult = ({ toolCallId, result }) => ({
-  ...(toolCallId ? { toolCallId } : {}),
-  result
-});
+// Vapi accepts only a flat, single-line string for a Function tool result.
+// Returning an object here makes the tool appear to have completed while Vapi
+// reports "No result returned" and drops the value from the conversation.
+const toVapiResultString = (value) => {
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+
+  return String(serialized ?? '').replace(/[\r\n]+/g, ' ').trim();
+};
+
+const buildToolResult = ({ toolCallId, result, error }) => {
+  const base = {
+    ...(toolCallId ? { toolCallId } : {})
+  };
+
+  // A per-tool failure must use `error`, not an object nested in `result`.
+  // The overall webhook response must still be HTTP 200.
+  if (error !== undefined) {
+    return { ...base, error: toVapiResultString(error) };
+  }
+
+  return { ...base, result: toVapiResultString(result) };
+};
 
 const slotTimeFormatter = new Intl.DateTimeFormat('en-PK', {
   timeZone: 'Asia/Karachi',
@@ -1315,9 +1333,7 @@ export const executeVapiFunctionCalls = async (payload) => {
       results.push(
         buildToolResult({
           toolCallId: toolCall.id,
-          result: {
-            error: error.message
-          }
+          error: error.message
         })
       );
     }

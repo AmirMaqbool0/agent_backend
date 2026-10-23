@@ -232,8 +232,9 @@ test('vapi booking tool confirms the booked time back to the caller', async () =
 
   assert.equal(status, 200);
   const result = payload.results?.[0]?.result;
+  assert.equal(typeof result, 'string', 'Vapi tool result must be a string');
   assert.ok(result, 'tool result returned');
-  const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+  const parsed = JSON.parse(result);
   assert.equal(parsed.success, true);
   assert.match(parsed.message, /booked successfully for/i);
 
@@ -261,7 +262,8 @@ test('vapi tools are matched regardless of name capitalization', async () => {
 
   assert.equal(status, 200);
   const result = payload.results?.[0]?.result;
-  const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+  assert.equal(typeof result, 'string', 'Vapi tool result must be a string');
+  const parsed = JSON.parse(result);
   assert.equal(payload.results?.[0]?.toolCallId, 'tool-faq');
   assert.equal(parsed.success, true);
   assert.ok(parsed.spokenAnswer, 'FAQ answer returned');
