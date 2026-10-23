@@ -1,6 +1,6 @@
 import { Appointment } from '../models/appointment.model.js';
 import { logger } from '../utils/logger.js';
-import { describeWhatsappError, sendWhatsappMessage } from './twilio.service.js';
+import { describeWhatsappError, getWhatsappMessageStatus, sendWhatsappMessage } from './twilio.service.js';
 
 // Twilio status order: queued -> sent -> delivered -> read, or failed/undelivered at any point.
 const STATUS_RANK = { sent: 1, delivered: 2, read: 3 };
@@ -50,7 +50,10 @@ const retryAsFreeForm = async (appointment, log, reason) => {
 };
 
 // Applies a Twilio status callback (MessageSid, MessageStatus, ErrorCode) to the appointment that sent it.
-export const applyTwilioStatusCallback = async ({ MessageSid, MessageStatus, ErrorCode, ErrorMessage }) => {
+export const applyTwilioStatusCallback = async (
+  { MessageSid, MessageStatus, ErrorCode, ErrorMessage },
+  { allowFallback = true } = {}
+) => {
   if (!MessageSid || !MessageStatus) {
     return null;
   }
@@ -66,7 +69,7 @@ export const applyTwilioStatusCallback = async ({ MessageSid, MessageStatus, Err
   if (['failed', 'undelivered'].includes(MessageStatus)) {
     const reason = describeWhatsappError(ErrorCode, ErrorMessage);
     const canFallBack =
-      log?.template && log.fallbackBody && !log.fallbackSent && !NO_FALLBACK_CODES.has(String(ErrorCode));
+      allowFallback && log?.template && log.fallbackBody && !log.fallbackSent && !NO_FALLBACK_CODES.has(String(ErrorCode));
 
     if (canFallBack) {
       await retryAsFreeForm(appointment, log, reason);
@@ -79,6 +82,7 @@ export const applyTwilioStatusCallback = async ({ MessageSid, MessageStatus, Err
     if (STATUS_RANK[MessageStatus] >= currentRank) {
       appointment.whatsappStatus = MessageStatus;
       appointment.whatsappError = '';
+      if (log) log.status = MessageStatus;
     }
   } else {
     return appointment;
@@ -87,4 +91,35 @@ export const applyTwilioStatusCallback = async ({ MessageSid, MessageStatus, Err
   await appointment.save();
   logger.info(`[WHATSAPP STATUS] appointment=${appointment._id} ${MessageSid} -> ${MessageStatus}${ErrorCode ? ` (${ErrorCode})` : ''}`);
   return appointment;
+};
+
+// Delivery callbacks can be missed or misconfigured. Reconcile recently accepted
+// messages when staff open the appointment list so "sent" cannot stay stale.
+export const refreshWhatsappStatuses = async (appointments) => {
+  const candidates = appointments
+    .filter((appointment) => appointment.whatsappStatus === 'sent' && appointment.whatsappMessageSid)
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))
+    .slice(0, 20);
+  const updated = new Map();
+
+  for (let index = 0; index < candidates.length; index += 4) {
+    await Promise.all(candidates.slice(index, index + 4).map(async (appointment) => {
+      try {
+        const provider = await getWhatsappMessageStatus(appointment.whatsappMessageSid);
+        if (!provider || provider.status === appointment.whatsappStatus ||
+          !['sent', 'delivered', 'read', 'failed', 'undelivered'].includes(provider.status)) return;
+        const current = await applyTwilioStatusCallback({
+          MessageSid: appointment.whatsappMessageSid,
+          MessageStatus: provider.status,
+          ErrorCode: provider.errorCode,
+          ErrorMessage: provider.errorMessage
+        }, { allowFallback: false });
+        if (current) updated.set(String(appointment._id), current);
+      } catch (error) {
+        logger.warn(`[WHATSAPP STATUS] provider check failed for appointment=${appointment._id}: ${error.message}`);
+      }
+    }));
+  }
+
+  return appointments.map((appointment) => updated.get(String(appointment._id)) || appointment);
 };

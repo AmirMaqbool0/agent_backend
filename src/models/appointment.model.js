@@ -99,7 +99,7 @@ const appointmentSchema = new mongoose.Schema(
           },
           status: {
             type: String,
-            enum: ['sent', 'failed', 'skipped'],
+            enum: ['sent', 'delivered', 'read', 'failed', 'skipped'],
             default: 'failed'
           },
           reason: {

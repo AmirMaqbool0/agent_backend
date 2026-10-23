@@ -99,9 +99,13 @@ const getRecordingUrl = (payload) => {
   const message = getMessagePayload(payload);
 
   return (
+    message.artifact?.recording?.mono?.combinedUrl ||
     message.artifact?.recording?.mono?.url ||
+    message.artifact?.recordingUrl ||
     message.artifact?.recording?.stereo?.url ||
+    message.artifact?.recording?.stereoUrl ||
     message.recordingUrl ||
+    getCallDetails(payload).recordingUrl ||
     payload.recordingUrl ||
     ''
   );

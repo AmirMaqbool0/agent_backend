@@ -11,6 +11,18 @@ const getTwilioClient = () => {
   return twilio(env.twilioAccountSid, env.twilioAuthToken);
 };
 
+export const getWhatsappMessageStatus = async (sid) => {
+  const client = getTwilioClient();
+  if (!client || !sid) return null;
+
+  const message = await client.messages(sid).fetch();
+  return {
+    status: message.status,
+    errorCode: message.errorCode,
+    errorMessage: message.errorMessage
+  };
+};
+
 export const normalizePhoneNumber = (value = '') => {
   const rawValue = String(value || '')
     .trim()

@@ -35,6 +35,7 @@ import { ApiError } from '../utils/apiError.js';
 import { parseAppointmentDateToDate } from '../utils/dateTime.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+import { refreshWhatsappStatuses } from './whatsappStatus.service.js';
 
 // Allow a small grace window so a booking made "right now" is not rejected by clock drift.
 const PAST_BOOKING_GRACE_MS = 5 * 60 * 1000;
@@ -559,10 +560,13 @@ export const createAppointment = async ({
   });
 };
 
-export const listAppointments = async () =>
-  Appointment.find()
+export const listAppointments = async () => {
+  const appointments = await Appointment.find()
     .populate('patient')
     .sort({ appointmentDate: 1 });
+
+  return refreshWhatsappStatuses(appointments);
+};
 
 export const cancelAppointment = async ({
   appointmentId,
