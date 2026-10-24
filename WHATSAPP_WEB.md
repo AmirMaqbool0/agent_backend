@@ -1,0 +1,9 @@
+# Self-hosted WhatsApp Web sender
+
+Set `WHATSAPP_PROVIDER=web` (the default), deploy the backend and dashboard, then sign in as a clinic admin. Open **Settings → Integrations → Link clinic WhatsApp** and scan the QR code using **WhatsApp → Linked devices → Link a device** on the clinic phone. The dashboard refreshes the QR code and connection state automatically. The linked session's credentials and Signal keys are stored in MongoDB, not Render's temporary filesystem.
+
+Booking, reschedule, and cancellation notifications are sent by the backend after the appointment change is saved. Staff can send a reminder from the appointment drawer's **Send WhatsApp reminder** button; reminders are never scheduled automatically. No Twilio sender or WhatsApp template is used in web mode. If the connection cannot be established within 20 seconds, the appointment is still saved and the message is marked **failed**; staff should verify the WhatsApp connection and contact the patient manually. A "sent" status means the WhatsApp Web socket accepted the message, not that the patient read it. Delivery/read acknowledgements update the appointment when available.
+
+This is an unofficial WhatsApp Web connection, not Meta's Business Platform. It can disconnect, fail after WhatsApp changes its Web protocol, or cause account restrictions. Use a dedicated clinic account and have an alternative way to contact patients. Render's free web service sleeps after 15 minutes without inbound traffic, so notification timing is not guaranteed; an always-on host or computer is needed for dependable unattended sending.
+
+To switch back to the legacy sender, set `WHATSAPP_PROVIDER=twilio` and configure the existing Twilio environment variables. Never commit QR codes, MongoDB credentials, or stored WhatsApp session documents.

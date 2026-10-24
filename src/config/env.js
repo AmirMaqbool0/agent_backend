@@ -79,6 +79,8 @@ export const env = {
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
   twilioWhatsappFrom: process.env.TWILIO_WHATSAPP_FROM || '',
+  // 'web' links the clinic's WhatsApp account through a QR code; 'twilio' keeps the legacy sender.
+  whatsappProvider: (process.env.WHATSAPP_PROVIDER || 'web').trim().toLowerCase(),
   // Approved WhatsApp templates (Twilio Content SIDs, "HX..."). Variables: {{1}} patient name,
   // {{2}} clinic name, {{3}} date, {{4}} time. Leave empty to send free-form text instead.
   whatsappTemplates: {

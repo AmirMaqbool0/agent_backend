@@ -20,9 +20,9 @@ import {
 } from './openai.service.js';
 import {
   normalizePhoneNumber,
-  safeSendNotification,
-  sendWhatsappMessage
+  safeSendNotification
 } from './twilio.service.js';
+import { sendWhatsappMessage } from './whatsapp.service.js';
 import {
   formatClinicDate,
   formatClinicDateTime,
@@ -250,9 +250,11 @@ const notifyPatient = async ({ config, kind, phone, patientName, appointmentDate
   const template = buildTemplate({ kind, config, patientName, appointmentDate });
   const result = await safeSendNotification(
     () =>
-      withRetry(() => sendWhatsappMessage({ to: phone, body, template }), {
-        operationName: `twilio-whatsapp-${kind}`
-      }),
+      env.whatsappProvider === 'web'
+        ? sendWhatsappMessage({ to: phone, body })
+        : withRetry(() => sendWhatsappMessage({ to: phone, body, template }), {
+            operationName: `twilio-whatsapp-${kind}`
+          }),
     'whatsapp'
   );
 
@@ -566,6 +568,28 @@ export const listAppointments = async () => {
     .sort({ appointmentDate: 1 });
 
   return refreshWhatsappStatuses(appointments);
+};
+
+export const sendAppointmentReminder = async (appointmentId) => {
+  const appointment = await Appointment.findById(appointmentId).populate('patient');
+  if (!appointment || !appointment.patient) throw new ApiError(404, 'Appointment not found');
+  if (appointment.status !== 'confirmed' || new Date(appointment.appointmentDate) <= new Date()) {
+    throw new ApiError(409, 'Reminders can only be sent for upcoming confirmed appointments');
+  }
+
+  const config = await getClinicConfig();
+  if (!config.whatsappEnabled || !config.remindersEnabled) {
+    throw new ApiError(409, 'WhatsApp reminders are turned off in clinic settings');
+  }
+
+  const body = `Hello ${appointment.patient.fullName}, this is a reminder of your appointment with ${config.clinicName} on ${formatClinicDateTime(appointment.appointmentDate, resolveClinicTimezone(config))}.`;
+  const result = await safeSendNotification(() => sendWhatsappMessage({ to: appointment.patient.phone, body }));
+  await applyNotificationResult(appointment, result);
+  if (result.success) {
+    appointment.notificationLogs[appointment.notificationLogs.length - 1].reason = 'Reminder sent by staff';
+    await appointment.save();
+  }
+  return Appointment.findById(appointment._id).populate('patient');
 };
 
 export const cancelAppointment = async ({

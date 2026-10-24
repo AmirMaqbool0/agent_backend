@@ -6,6 +6,7 @@ import {
   fetchAppointments,
   fetchAvailability,
   rescheduleExistingAppointment,
+  sendReminderForAppointment,
   updateExistingAppointment
 } from '../controllers/appointment.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
@@ -38,5 +39,6 @@ router.put(
   validateRequest,
   cancelExistingAppointment
 );
+router.post('/:id/reminder', authenticate, sendReminderForAppointment);
 
 export default router;

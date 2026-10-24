@@ -4,6 +4,7 @@ import {
   getAvailability,
   listAppointments,
   rescheduleAppointment,
+  sendAppointmentReminder,
   updateAppointment
 } from '../services/appointment.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -46,4 +47,9 @@ export const cancelExistingAppointment = asyncHandler(async (req, res) => {
   });
 
   sendSuccess(res, 200, 'Appointment cancelled successfully', appointment);
+});
+
+export const sendReminderForAppointment = asyncHandler(async (req, res) => {
+  const appointment = await sendAppointmentReminder(req.params.id);
+  sendSuccess(res, 200, 'Reminder processed', appointment);
 });

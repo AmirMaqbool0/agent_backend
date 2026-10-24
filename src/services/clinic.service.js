@@ -1,5 +1,6 @@
 import { env } from '../config/env.js';
 import { ClinicConfig } from '../models/clinicConfig.model.js';
+import { getWhatsappWebStatus } from './whatsappWeb.service.js';
 
 const EDITABLE_FIELDS = [
   'clinicName',
@@ -92,7 +93,9 @@ export const updateClinicConfig = async (payload) => {
 };
 
 // Only reports whether each provider has credentials; never returns the secrets themselves.
-export const getIntegrationStatus = () => ({
+export const getIntegrationStatus = () => {
+  const whatsappWeb = getWhatsappWebStatus();
+  return {
   openai: {
     configured: Boolean(env.openAiApiKey),
     detail: env.openAiApiKey ? `Model ${env.openAiModel}` : 'OPENAI_API_KEY is not set'
@@ -111,7 +114,14 @@ export const getIntegrationStatus = () => ({
         : `${env.googleCalendarAuthMode === 'oauth' ? 'OAuth' : 'Service account'} connection`
   },
   twilio: {
-    configured: Boolean(env.twilioAccountSid && env.twilioAuthToken && env.twilioWhatsappFrom),
-    detail: env.twilioWhatsappFrom ? 'WhatsApp sender configured' : 'Twilio WhatsApp sender is not set'
+    configured: env.whatsappProvider === 'twilio' && Boolean(env.twilioAccountSid && env.twilioAuthToken && env.twilioWhatsappFrom),
+    detail: env.whatsappProvider === 'twilio' ? (env.twilioWhatsappFrom ? 'WhatsApp sender configured' : 'Twilio WhatsApp sender is not set') : 'Not used; WhatsApp Web is selected'
+  },
+  whatsappWeb: {
+    configured: whatsappWeb.state === 'connected',
+    detail: whatsappWeb.state === 'connected'
+      ? `Connected as +${whatsappWeb.phone}`
+      : `Status: ${whatsappWeb.state.replace('_', ' ')}`
   }
-});
+  };
+};

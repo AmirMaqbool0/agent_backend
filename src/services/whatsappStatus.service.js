@@ -1,4 +1,5 @@
 import { Appointment } from '../models/appointment.model.js';
+import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { describeWhatsappError, getWhatsappMessageStatus, sendWhatsappMessage } from './twilio.service.js';
 
@@ -54,6 +55,7 @@ export const applyTwilioStatusCallback = async (
   { MessageSid, MessageStatus, ErrorCode, ErrorMessage },
   { allowFallback = true } = {}
 ) => {
+  if (env.whatsappProvider === 'web') return null;
   if (!MessageSid || !MessageStatus) {
     return null;
   }
@@ -96,6 +98,7 @@ export const applyTwilioStatusCallback = async (
 // Delivery callbacks can be missed or misconfigured. Reconcile recently accepted
 // messages when staff open the appointment list so "sent" cannot stay stale.
 export const refreshWhatsappStatuses = async (appointments) => {
+  if (env.whatsappProvider === 'web') return appointments;
   const candidates = appointments
     .filter((appointment) => appointment.whatsappStatus === 'sent' && appointment.whatsappMessageSid)
     .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))

@@ -2,6 +2,7 @@ import app from './app.js';
 import { connectDatabase } from './config/database.js';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
+import { startWhatsappWeb } from './services/whatsappWeb.service.js';
 
 const startServer = async () => {
   await connectDatabase();
@@ -11,6 +12,7 @@ const startServer = async () => {
   const server = app.listen(env.port, () => {
     logger.info(`Server running on port ${env.port}`);
   });
+  startWhatsappWeb().catch((error) => logger.error(`WhatsApp Web startup failed: ${error.message}`));
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
