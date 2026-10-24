@@ -3,6 +3,7 @@ import { connectDatabase } from './config/database.js';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { startWhatsappWeb } from './services/whatsappWeb.service.js';
+import { startWhatsappOutboxWorker } from './services/whatsappOutbox.service.js';
 
 const startServer = async () => {
   await connectDatabase();
@@ -13,6 +14,9 @@ const startServer = async () => {
     logger.info(`Server running on port ${env.port}`);
   });
   startWhatsappWeb().catch((error) => logger.error(`WhatsApp Web startup failed: ${error.message}`));
+  if (env.whatsappProvider === 'web') {
+    startWhatsappOutboxWorker().catch((error) => logger.error(`WhatsApp outbox startup failed: ${error.message}`));
+  }
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {

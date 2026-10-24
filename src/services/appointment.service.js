@@ -36,6 +36,7 @@ import { parseAppointmentDateToDate } from '../utils/dateTime.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 import { refreshWhatsappStatuses } from './whatsappStatus.service.js';
+import { enqueueWhatsappEvent, kickWhatsappOutbox } from './whatsappOutbox.service.js';
 
 // Allow a small grace window so a booking made "right now" is not rejected by clock drift.
 const PAST_BOOKING_GRACE_MS = 5 * 60 * 1000;
@@ -69,8 +70,10 @@ const buildIntervalFromIso = ({ start, end, clinicTimezone }) => {
 const applyNotificationResult = async (appointment, notificationResult) => {
   const sent = Boolean(notificationResult?.success);
   const skipped = Boolean(notificationResult?.providerResult?.skipped);
+  const pending = Boolean(notificationResult?.providerResult?.pending);
   const error = notificationResult?.error || '';
   const attemptedAt = notificationResult?.attemptedAt || new Date();
+  const status = sent ? 'sent' : pending ? 'pending' : skipped ? 'skipped' : 'failed';
 
   appointment.notificationStatus = {
     ...(appointment.notificationStatus || {}),
@@ -84,8 +87,9 @@ const applyNotificationResult = async (appointment, notificationResult) => {
     ...(appointment.notificationLogs || []),
     {
       channel: notificationResult?.channel || 'whatsapp',
-      status: sent ? 'sent' : skipped ? 'skipped' : 'failed',
+      status,
       reason: error,
+      outboxId: notificationResult?.providerResult?.outboxId || null,
       sid: notificationResult?.providerResult?.sid || '',
       template: notificationResult?.providerResult?.usedTemplate || '',
       fallbackBody: notificationResult?.providerResult?.usedTemplate ? notificationResult.providerResult.body || '' : '',
@@ -93,11 +97,12 @@ const applyNotificationResult = async (appointment, notificationResult) => {
     }
   ];
   appointment.confirmationSent = sent;
-  appointment.whatsappStatus = sent ? 'sent' : skipped ? 'skipped' : 'failed';
+  appointment.whatsappStatus = status;
   appointment.whatsappError = error;
   // Twilio reports final delivery asynchronously; the SID links that report back to this appointment.
   appointment.whatsappMessageSid = notificationResult?.providerResult?.sid || '';
   await appointment.save();
+  if (pending) kickWhatsappOutbox();
 };
 
 const attachAppointmentMeta = (appointmentDoc, meta = {}) => {
@@ -237,13 +242,41 @@ const buildTemplate = ({ kind, config, patientName, appointmentDate }) => {
 };
 
 // Respects the WhatsApp and confirmation switches on the Settings page.
-const notifyPatient = async ({ config, kind, phone, patientName, appointmentDate, buildMessage }) => {
+const notifyPatient = async ({ appointment, config, kind, phone, patientName, appointmentDate, buildMessage }) => {
   if (!config.whatsappEnabled) {
     return skippedNotification('WhatsApp notifications are turned off in clinic settings');
   }
 
   if (kind === 'confirmation' && config.confirmationsEnabled === false) {
     return skippedNotification('Booking confirmations are turned off in clinic settings');
+  }
+
+  if (env.whatsappProvider === 'web') {
+    const when = formatClinicDateTime(appointmentDate, resolveClinicTimezone(config));
+    const clinic = config.clinicName || 'the clinic';
+    const body = kind === 'confirmation'
+      ? `Hello ${patientName}, your appointment with ${clinic} is confirmed for ${when}.`
+      : kind === 'reschedule'
+        ? `Hello ${patientName}, your appointment with ${clinic} has been rescheduled to ${when}.`
+        : `Hello ${patientName}, your appointment with ${clinic} scheduled for ${when} has been cancelled.`;
+    try {
+      const job = await enqueueWhatsappEvent({ appointment, kind, phone, body });
+      return {
+        success: false,
+        channel: 'whatsapp',
+        error: '',
+        attemptedAt: new Date(),
+        providerResult: { pending: true, outboxId: job._id }
+      };
+    } catch (error) {
+      logger.error(`Could not queue WhatsApp ${kind}: ${error.message}`);
+      return {
+        success: false,
+        channel: 'whatsapp',
+        error: `Could not queue WhatsApp message: ${error.message}`,
+        attemptedAt: new Date()
+      };
+    }
   }
 
   const body = await buildMessage();
@@ -536,6 +569,7 @@ export const createAppointment = async ({
 
   const spokenDateTime = formatClinicDateTime(date, clinicTimezone);
   const notificationResult = await notifyPatient({
+    appointment,
     config,
     kind: 'confirmation',
     phone: patient.phone,
@@ -556,6 +590,7 @@ export const createAppointment = async ({
   return attachAppointmentMeta(populatedAppointment, {
     calendarEventCreated: calendarResult.status === 'created',
     notificationSent: notificationResult.success,
+    notificationQueued: Boolean(notificationResult.providerResult?.pending),
     notificationError: notificationResult.error,
     spokenDateTime,
     message: 'Appointment booked successfully.'
@@ -625,6 +660,7 @@ export const cancelAppointment = async ({
   const clinicTimezone = resolveClinicTimezone(config);
   const cancellationNotification = appointment.patient
     ? await notifyPatient({
+        appointment,
         config,
         kind: 'cancellation',
         phone: appointment.patient.phone,
@@ -647,6 +683,7 @@ export const cancelAppointment = async ({
   return attachAppointmentMeta(populatedAppointment, {
     calendarEventCreated: calendarResult.status === 'deleted',
     notificationSent: cancellationNotification.success,
+    notificationQueued: Boolean(cancellationNotification.providerResult?.pending),
     notificationError: cancellationNotification.error,
     message: 'Your appointment has been cancelled successfully.'
   });
@@ -709,6 +746,7 @@ export const rescheduleAppointment = async ({
 
   const spokenDateTime = formatClinicDateTime(nextDate, clinicTimezone);
   const rescheduleNotification = await notifyPatient({
+    appointment,
     config,
     kind: 'reschedule',
     phone: appointment.patient.phone,
@@ -730,6 +768,7 @@ export const rescheduleAppointment = async ({
   return attachAppointmentMeta(populatedAppointment, {
     calendarEventCreated: calendarResult.status === 'created',
     notificationSent: rescheduleNotification.success,
+    notificationQueued: Boolean(rescheduleNotification.providerResult?.pending),
     notificationError: rescheduleNotification.error,
     spokenDateTime,
     message: 'Appointment rescheduled successfully.'

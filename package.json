@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "test": "node --test src/utils/availability.test.js src/services/twilio.template.test.js src/services/recordingAccess.test.js src/services/whatsappWeb.test.js",
+    "test": "node --test src/utils/availability.test.js src/services/twilio.template.test.js src/services/recordingAccess.test.js src/services/whatsappWeb.test.js src/services/whatsappOutbox.test.js",
     "seed:admin": "node src/scripts/seedAdmin.js",
     "test:integration": "node --test src/services/appointment.cancellation.test.js src/services/api.regression.test.js",
     "whatsapp:templates": "node src/scripts/createWhatsappTemplates.js",

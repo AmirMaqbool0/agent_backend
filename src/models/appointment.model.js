@@ -99,8 +99,12 @@ const appointmentSchema = new mongoose.Schema(
           },
           status: {
             type: String,
-            enum: ['sent', 'delivered', 'read', 'failed', 'skipped'],
+            enum: ['pending', 'sent', 'delivered', 'read', 'failed', 'skipped'],
             default: 'failed'
+          },
+          outboxId: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: null
           },
           reason: {
             type: String,

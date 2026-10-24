@@ -195,13 +195,14 @@ const waitUntilConnected = async () => {
   return socket;
 };
 
-export const sendWhatsappWebMessage = async ({ to, body }) => {
+export const sendWhatsappWebMessage = async ({ to, body, beforeSend }) => {
   const phone = normalizePhoneNumber(to);
   if (!/^\+\d{8,15}$/.test(phone)) throw new Error('A valid international WhatsApp number is required');
   if (!body?.trim()) throw new Error('WhatsApp message is empty');
   const activeSocket = await waitUntilConnected();
   const recipients = await activeSocket.onWhatsApp(phone.slice(1));
   if (!recipients?.[0]?.exists) throw new Error('The patient number is not registered on WhatsApp');
+  if (beforeSend) await beforeSend();
   const result = await activeSocket.sendMessage(recipients[0].jid, { text: body });
   if (!result?.key?.id) throw new Error('WhatsApp Web did not accept the message');
   return {
